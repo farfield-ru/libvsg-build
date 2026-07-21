@@ -19,9 +19,16 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # windows-2022 (VS 2022, MSVC 14.4x), NOT windows-latest: the VS 2026
+        # toolset on windows-latest (MSVC 14.51) has a documented known issue
+        # "cl.exe hangs compiling some source files" and deterministically
+        # hangs on assimp's vendored contrib sources (6h job timeout). The
+        # MSVC 14.x ABI is stable, so VS 2026 consumers link these DLLs fine.
+        # Revisit when the MSVC fix ships.
+        os: [ubuntu-latest, windows-2022]
         build_type: [Release, Debug, RelWithDebInfo]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
 

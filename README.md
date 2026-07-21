@@ -122,6 +122,13 @@ push to `main` (and on manual dispatch), uploads each build as a workflow
 artifact, and then creates/updates the `vsg-<VSG_TAG>` GitHub Release with all
 six archives.
 
+Windows builds are pinned to `windows-2022` (VS 2022, MSVC 14.4x): the
+VS 2026 toolset currently on `windows-latest` (MSVC 14.51) has a documented
+known issue — *"cl.exe hangs compiling some source files"* — and
+deterministically hangs on assimp's vendored contrib sources. The MSVC 14.x
+ABI is stable, so VS 2026 consumers link these DLLs without issues. Move back
+to `windows-latest` once the MSVC fix ships.
+
 ## Upgrading
 
 Change the tags in `.github/workflows/build.yml` (and the defaults in
