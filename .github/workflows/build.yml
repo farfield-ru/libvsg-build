@@ -53,12 +53,39 @@ jobs:
         with:
           arch: x64
 
-      - name: Install Vulkan SDK
-        # Same action + commit pin as VulkanSceneGraph's own CI.
+      - name: Install Vulkan SDK (Linux)
+        # Same action + commit pin as VulkanSceneGraph's own CI. Linux-only:
+        # the action's Windows path merely 7z-extracts the installer and the
+        # result has no Lib/vulkan-1.lib, so find_package(Vulkan) fails.
+        if: runner.os == 'Linux'
         uses: humbletim/install-vulkan-sdk@c2aa128094d42ba02959a660f03e0a4e012192f9
         with:
           version: ${{ env.VULKAN_SDK_VERSION }}
           cache: true
+
+      - name: Cache Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        id: vulkan-cache
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
+          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}
+
+      - name: Install Vulkan SDK (Windows)
+        # Official LunarG silent install (Qt IFW installer).
+        if: runner.os == 'Windows' && steps.vulkan-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $Installer = Join-Path $env:RUNNER_TEMP 'vulkan_sdk.exe'
+          curl.exe -sSL -o $Installer "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/vulkan_sdk.exe"
+          Start-Process -Wait $Installer -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+
+      - name: Export VULKAN_SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
