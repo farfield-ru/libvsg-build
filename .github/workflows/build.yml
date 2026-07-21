@@ -1,0 +1,97 @@
+name: Build VSG
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  VSG_TAG: v1.1.15
+  VSGXCHANGE_TAG: v1.1.13
+  VSGIMGUI_TAG: v0.7.0
+  ASSIMP_TAG: v6.0.4
+  GLSLANG_TAG: 16.3.0
+  VULKAN_SDK_VERSION: 1.4.341.1
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.build_type }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release, Debug, RelWithDebInfo]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies (Linux)
+        # libxcb1-dev + pkg-config: required by VSG's xcb windowing support
+        # (vsgConfig.cmake pkg_check_modules(xcb REQUIRED) - consumers need
+        # the same package at configure time).
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config libxcb1-dev
+
+      - name: Install Ninja (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y
+          }
+
+      - name: Set up MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Vulkan SDK
+        # Same action + commit pin as VulkanSceneGraph's own CI.
+        uses: humbletim/install-vulkan-sdk@c2aa128094d42ba02959a660f03e0a4e012192f9
+        with:
+          version: ${{ env.VULKAN_SDK_VERSION }}
+          cache: true
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: ./scripts/build.sh ${{ matrix.build_type }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build.ps1 -BuildType ${{ matrix.build_type }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vsg-${{ env.VSG_TAG }}-${{ runner.os == 'Windows' && 'windows' || 'linux' }}-x64-${{ matrix.build_type }}
+          path: _work/dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="vsg-${VSG_TAG}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "VulkanSceneGraph ${VSG_TAG} shared libraries" \
+              --notes "VulkanSceneGraph ${VSG_TAG}, vsgXchange ${VSGXCHANGE_TAG} and vsgImGui ${VSGIMGUI_TAG} built as shared libraries for Linux (x64) and Windows (x64, MSVC) in Release, Debug and RelWithDebInfo configurations. glslang ${GLSLANG_TAG} (VSG runtime shader compiler) and assimp ${ASSIMP_TAG} (vsgXchange model importers) are statically absorbed. vsgImGui compiles its pinned imgui/implot submodules in and re-exports the full ImGui/ImPlot API from the DLL."
+          gh release upload "$TAG" dist/* --clobber

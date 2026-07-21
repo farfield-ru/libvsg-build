@@ -1,0 +1,4 @@
+# Patch files must be checked out byte-exact (LF) on all platforms, otherwise
+# git apply fails against the upstream LF working trees on Windows runners.
+*.patch -text
+*.sh text eol=lf
