@@ -32,9 +32,15 @@ match the versions modeuler-ng previously received from vcpkg (baseline
 ### Feature choices (parity with modeuler-ng's vcpkg manifest)
 
 - **vsg**: windowing ON (xcb on Linux, native Win32 on Windows), shader
-  compiler ON (glslang), shader *optimizer* OFF (no SPIRV-Tools, same as
-  vcpkg's plain `glslang` dependency). The build **fails** if VSG silently
-  drops the shader compiler (it only warns when glslang is missing).
+  compiler ON (glslang), shader *optimizer* **pre-seeded OFF** (no
+  SPIRV-Tools, same as vcpkg's plain `glslang` dependency). Upstream defaults
+  `VSG_SUPPORTS_ShaderOptimizer` ON and keeps it whenever
+  `find_package(SPIRV-Tools-opt)` succeeds, so on a host with a Vulkan SDK it
+  would otherwise be enabled by accident — and the generated `vsgConfig.cmake`
+  would then make **every consumer** need a `SPIRV-Tools-opt` package this
+  artifact does not ship. The build **fails** if VSG silently drops the shader
+  compiler (it only warns when glslang is missing) or if the optimizer sneaks
+  back in.
 - **vsgXchange**: `assimp` reader ON — every other optional dependency
   (freetype, curl, GDAL, OpenEXR, KTX, draco, OSG) is pre-seeded OFF so a
   library found on the build host can never leak into the artifact. The
@@ -43,6 +49,16 @@ match the versions modeuler-ng previously received from vcpkg (baseline
   (vsgXchange would otherwise silently ship a stub reader).
 - **vsgImGui**: `SHOW_DEMO_WINDOW=OFF` (`ImGui::ShowDemoWindow` is a stub),
   matching the vcpkg port.
+
+### Consumer smoke test
+
+Every configuration builds `scripts/smoke/` against the finished install
+prefix — `find_package` for all three packages, compile, link, run — before
+the archive is packaged, with `CMAKE_PREFIX_PATH` set to the install dir
+alone. Compiling the libraries only proves they build; this proves the
+**install** is consumable, which is the property downstream projects actually
+depend on. On Windows it doubles as the ImGui re-export check: a `vsgImGui`
+DLL that does not re-export the ImGui API fails to link it with LNK2019.
 
 ### Why shared vsgImGui works here (unlike vcpkg's)
 

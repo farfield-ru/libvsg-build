@@ -109,14 +109,36 @@ build assimp \
 
 # VulkanSceneGraph - shared. Windowing (xcb) and the glslang shader compiler
 # are ON by default; both must survive into the artifact (checked below).
+#
+# VSG_SUPPORTS_ShaderOptimizer is pre-seeded OFF for the same reason the
+# vsgXchange options below are: upstream defaults it ON and then quietly keeps
+# it if find_package(SPIRV-Tools-opt) happens to succeed, so whatever is
+# installed on the build host decides what ends up in the artifact. It also
+# matches -DENABLE_OPT=OFF on glslang above and the vcpkg configuration this
+# build replaces, neither of which has the optimizer.
 build vsg \
-  -DBUILD_SHARED_LIBS=ON
+  -DBUILD_SHARED_LIBS=ON \
+  -DVSG_SUPPORTS_ShaderOptimizer=OFF
 
 # VSG only *warns* and silently disables the shader compiler when glslang is
 # not found - guard against shipping a degraded build. The installed
 # vsgConfig.cmake contains find_package(glslang) iff the compiler is in.
 if ! grep -q "find_package(glslang" "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake"; then
   echo "ERROR: vsg was built WITHOUT the glslang shader compiler" >&2
+  exit 1
+fi
+
+# The mirror of that check, for the optimizer. vsgConfig.cmake is generated as
+#   if (@VSG_SUPPORTS_ShaderOptimizer@)
+#       find_dependency(SPIRV-Tools-opt)
+# so a host-detected optimizer makes EVERY consumer need a SPIRV-Tools-opt
+# package this artifact does not ship, and find_package(vsg) fails outright.
+# Test the generated gate line itself rather than the whole file, so an
+# unrelated `if (ON)` in a future VSG config template cannot mask this.
+if grep -B1 "find_dependency(SPIRV-Tools-opt)" \
+     "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake" | grep -q "if (ON)"; then
+  echo "ERROR: vsg picked up SPIRV-Tools from the build host - vsgConfig.cmake" >&2
+  echo "       now requires a SPIRV-Tools-opt package this artifact does not ship" >&2
   exit 1
 fi
 
@@ -147,6 +169,18 @@ fi
 build vsgimgui \
   -DBUILD_SHARED_LIBS=ON \
   -DSHOW_DEMO_WINDOW=OFF
+
+# Consume the prefix the way a downstream project does - find_package,
+# compile, link, run - before packaging it. Building the libraries proves they
+# compile; only this proves the INSTALL is usable. CMAKE_PREFIX_PATH is the
+# install dir alone, so anything the artifact fails to provide surfaces here.
+SMOKE_BUILD="$WORK/build-smoke-$BUILD_TYPE"
+rm -rf "$SMOKE_BUILD"
+cmake -S "$ROOT/scripts/smoke" -B "$SMOKE_BUILD" -G Ninja \
+  -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+  -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
+cmake --build "$SMOKE_BUILD"
+LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}" "$SMOKE_BUILD/vsg_smoke"
 
 ARCHIVE="$DIST_DIR/vsg-$VSG_TAG-linux-x64-$BUILD_TYPE.tar.gz"
 tar -czf "$ARCHIVE" -C "$WORK/install" "vsg-$BUILD_TYPE"
