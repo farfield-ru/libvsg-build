@@ -107,11 +107,12 @@ find_package(vsgXchange CONFIG REQUIRED) # target vsgXchange::vsgXchange
 find_package(vsgImGui CONFIG REQUIRED)   # target vsgImGui::vsgImGui
 ```
 
-All transitive CMake packages resolve inside the prefix itself (glslang's and
-assimp's configs are installed alongside). Configure-time host requirements:
+All transitive CMake packages resolve inside the prefix itself: glslang's and
+assimp's configs are installed alongside, and `vsgConfig.cmake`'s
+`find_package(Vulkan REQUIRED)` is satisfied by the prefix's own Vulkan
+headers and loader — no Vulkan SDK, no `libvulkan-dev`. The only remaining
+configure-time host requirement:
 
-- **Vulkan**: `vsgConfig.cmake` does `find_package(Vulkan REQUIRED)` — Vulkan
-  SDK on Windows, `libvulkan-dev` on Linux.
 - **Linux only**: `pkg-config` + `libxcb1-dev` (`vsgConfig.cmake` runs
   `pkg_check_modules(xcb REQUIRED)` because windowing was built in).
 
@@ -129,19 +130,20 @@ that the shared libraries link and load.
 
 ## Patches
 
-`patches/<component>/*.patch` (component ∈ `glslang`, `assimp`, `vsg`,
-`vsgxchange`, `vsgimgui`) are applied with `git apply` after cloning the
-upstream tag. Currently empty.
+`patches/<component>/*.patch` (component ∈ `vulkan-headers`, `vulkan-loader`,
+`glslang`, `assimp`, `vsg`, `vsgxchange`, `vsgimgui`) are applied with
+`git apply` after cloning the upstream tag. Currently empty.
 
 ## Local build
 
-Linux (needs cmake, ninja, git, pkg-config, libxcb1-dev, libvulkan-dev):
+Linux (needs cmake, ninja, git, pkg-config, libxcb1-dev — no Vulkan SDK or
+libvulkan-dev, Vulkan is built into the prefix):
 
 ```sh
 ./scripts/build.sh Release        # or Debug / RelWithDebInfo
 ```
 
-Windows (from an *x64 Native Tools* developer prompt, requires Ninja and the
+Windows (from an *x64 Native Tools* developer prompt, requires Ninja — no
 Vulkan SDK):
 
 ```powershell
@@ -149,8 +151,9 @@ Vulkan SDK):
 ```
 
 The script clones the pinned tags, builds in dependency order
-(glslang → assimp → vsg → vsgXchange → vsgImGui), installs into
-`_work/install/vsg-<BuildType>/` and packages an archive into `_work/dist/`.
+(Vulkan-Headers → Vulkan-Loader → glslang → assimp → vsg → vsgXchange →
+vsgImGui), installs into `_work/install/vsg-<BuildType>/` and packages an
+archive into `_work/dist/`.
 
 ## CI
 
