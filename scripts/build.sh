@@ -3,6 +3,10 @@
 #
 # Usage: scripts/build.sh [Release|Debug|RelWithDebInfo]
 #
+# No Vulkan SDK is required: the Vulkan headers and loader are built from
+# pinned Khronos tags and installed into the prefix, so the artifact satisfies
+# find_package(Vulkan) and carries its own libvulkan.so.1.
+#
 # Helper dependencies (glslang for the VSG runtime shader compiler, assimp for
 # the vsgXchange model loaders) are built as static PIC libraries and absorbed
 # into the shared libraries. Everything installs into a single prefix per
@@ -14,6 +18,7 @@
 #   VSGIMGUI_TAG   - vsg-dev/vsgImGui tag         (default: v0.7.0)
 #   ASSIMP_TAG     - assimp/assimp tag            (default: v6.0.4)
 #   GLSLANG_TAG    - KhronosGroup/glslang tag     (default: 16.3.0)
+#   VULKAN_TAG     - Khronos Vulkan-Headers/Loader tag (default: vulkan-sdk-1.4.341.0)
 
 set -euo pipefail
 
@@ -28,6 +33,11 @@ VSGXCHANGE_TAG="${VSGXCHANGE_TAG:-v1.1.13}"
 VSGIMGUI_TAG="${VSGIMGUI_TAG:-v0.7.0}"
 ASSIMP_TAG="${ASSIMP_TAG:-v6.0.4}"
 GLSLANG_TAG="${GLSLANG_TAG:-16.3.0}"
+# Vulkan-Headers and Vulkan-Loader are built and INSTALLED INTO THE PREFIX so
+# the artifact satisfies find_package(Vulkan) by itself - vsgConfig.cmake
+# requires it, and so does every consumer. Both tags track the SDK version this
+# repo used to install on the runners.
+VULKAN_TAG="${VULKAN_TAG:-vulkan-sdk-1.4.341.0}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$ROOT/_work"
@@ -74,6 +84,8 @@ build() { # build <dir-name> [cmake args...]
   cmake --build "$bdir" --target install
 }
 
+clone vulkan-headers https://github.com/KhronosGroup/Vulkan-Headers.git "$VULKAN_TAG"
+clone vulkan-loader  https://github.com/KhronosGroup/Vulkan-Loader.git  "$VULKAN_TAG"
 clone glslang  https://github.com/KhronosGroup/glslang.git      "$GLSLANG_TAG"
 clone assimp   https://github.com/assimp/assimp.git             "$ASSIMP_TAG"
 clone vsg      https://github.com/vsg-dev/VulkanSceneGraph.git  "$VSG_TAG"
@@ -83,6 +95,37 @@ clone vsgxchange https://github.com/vsg-dev/vsgXchange.git      "$VSGXCHANGE_TAG
 # API - see README).
 clone vsgimgui https://github.com/vsg-dev/vsgImGui.git          "$VSGIMGUI_TAG" \
   --recurse-submodules --shallow-submodules
+
+# Vulkan-Headers - header only. Must be installed before the loader and before
+# vsg, both of which find_package(Vulkan) against the prefix.
+build vulkan-headers
+
+# Vulkan-Loader - shared (libvulkan.so.1), installed into the prefix so the
+# artifact carries its own runtime loader. WSI: XCB only, which EXACTLY matches
+# the loader this build previously took from vcpkg/the SDK - verified by
+# comparing exported surface entry points (vkCreateXcbSurfaceKHR +
+# vkCreateDisplayPlaneSurfaceKHR, no Xlib, no Wayland). Leaving Xlib on would
+# also drag an xrandr dev package in for a surface type VSG never creates: it
+# takes an xcb_window_t.
+build vulkan-loader \
+  -DBUILD_TESTS=OFF \
+  -DBUILD_WSI_XCB_SUPPORT=ON \
+  -DBUILD_WSI_XLIB_SUPPORT=OFF \
+  -DBUILD_WSI_WAYLAND_SUPPORT=OFF
+
+# The loader is useless to VSG without the xcb surface entry point - a loader
+# built without it links fine and then fails at window creation.
+# NOT `nm ... | grep -q`: under `set -o pipefail` (line 18) grep -q exits on the
+# first match, nm dies of SIGPIPE with 141, and pipefail makes the whole
+# pipeline fail - so the guard fires on a PERFECTLY GOOD loader. Observed, not
+# theoretical: that is exactly how this guard first behaved. Capture, then
+# match, so no pipe exists to break.
+vk_symbols="$(nm -D --defined-only "$INSTALL_DIR/lib/libvulkan.so")"
+case "$vk_symbols" in
+  *vkCreateXcbSurfaceKHR*) ;;
+  *) echo "ERROR: the built Vulkan loader has no XCB WSI support" >&2
+     exit 1 ;;
+esac
 
 # glslang - static, linked PRIVATE into libvsg.so (runtime GLSL->SPIR-V
 # compiler behind VSG_SUPPORTS_ShaderCompiler). Same configuration as the
@@ -135,12 +178,19 @@ fi
 # package this artifact does not ship, and find_package(vsg) fails outright.
 # Test the generated gate line itself rather than the whole file, so an
 # unrelated `if (ON)` in a future VSG config template cannot mask this.
-if grep -B1 "find_dependency(SPIRV-Tools-opt)" \
-     "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake" | grep -q "if (ON)"; then
-  echo "ERROR: vsg picked up SPIRV-Tools from the build host - vsgConfig.cmake" >&2
-  echo "       now requires a SPIRV-Tools-opt package this artifact does not ship" >&2
-  exit 1
-fi
+# Also pipe-free, and here the pipe was the DANGEROUS direction: `grep ... |
+# grep -q` returning 141 on SIGPIPE would have made this `if` false and the
+# guard silently skip on exactly the broken artifact it exists to reject.
+# `|| true` because grep exits 1 when the file has no such line at all, which
+# is the healthy case and must not trip `set -e`.
+spirv_gate="$(grep -B1 "find_dependency(SPIRV-Tools-opt)" \
+                "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake" || true)"
+case "$spirv_gate" in
+  *"if (ON)"*)
+     echo "ERROR: vsg picked up SPIRV-Tools from the build host - vsgConfig.cmake" >&2
+     echo "       now requires a SPIRV-Tools-opt package this artifact does not ship" >&2
+     exit 1 ;;
+esac
 
 # vsgXchange - shared. assimp is the only optional dependency enabled
 # (matches modeuler-ng's vcpkg feature set: vsgxchange[assimp]). The other

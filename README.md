@@ -16,6 +16,8 @@ One install prefix per configuration (`vsg-<BuildType>/`) containing:
 | [VulkanSceneGraph](https://github.com/vsg-dev/VulkanSceneGraph) | `v1.1.15` | **shared** | Core scene graph / Vulkan renderer |
 | [vsgXchange](https://github.com/vsg-dev/vsgXchange) | `v1.1.13` | **shared** | Asset readers/writers (`vsgXchange::all`) |
 | [vsgImGui](https://github.com/vsg-dev/vsgImGui) | `v0.7.0` | **shared** | Dear ImGui + ImPlot integration (imgui/implot compiled in from its pinned submodules) |
+| [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | `vulkan-sdk-1.4.341.0` | headers | Satisfies `find_package(Vulkan)` for vsg **and for consumers** |
+| [Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader) | `vulkan-sdk-1.4.341.0` | **shared** | The runtime loader (`libvulkan.so.1` / `vulkan-1.dll`) |
 | [glslang](https://github.com/KhronosGroup/glslang) | `16.3.0` | static (PIC), absorbed into vsg | Runtime GLSL→SPIR-V compiler (`VSG_SUPPORTS_ShaderCompiler`) |
 | [assimp](https://github.com/assimp/assimp) | `v6.0.4` | static (PIC), absorbed into vsgXchange | Model importers for the vsgXchange assimp reader |
 
@@ -49,6 +51,25 @@ match the versions modeuler-ng previously received from vcpkg (baseline
   (vsgXchange would otherwise silently ship a stub reader).
 - **vsgImGui**: `SHOW_DEMO_WINDOW=OFF` (`ImGui::ShowDemoWindow` is a stub),
   matching the vcpkg port.
+
+### No Vulkan SDK required
+
+Vulkan is built from pinned Khronos tags and installed into the prefix, so the
+artifact satisfies `find_package(Vulkan)` on its own and ships the runtime
+loader. Consumers need no SDK, and neither does this repo's CI — the LunarG
+installer, the SDK cache and the System32 `vulkan-1.dll` shuffle it needed to
+run the smoke test are all gone.
+
+On Linux the loader is built with **XCB WSI only**, matching exactly what the
+previously-consumed loader exported (`vkCreateXcbSurfaceKHR` +
+`vkCreateDisplayPlaneSurfaceKHR`; no Xlib, no Wayland). VSG creates its surface
+from an `xcb_window_t`, and enabling Xlib would pull an xrandr dev package in
+for a surface type nothing creates. Windows uses the Win32 WSI default.
+
+What the artifact still expects from the host on Linux: `libxcb` (and its
+`xcb.pc`, which `vsgConfig.cmake` checks at configure time) plus the usual C++
+runtime. Bundling libxcb was considered and rejected — `libX11` links the
+system one, so a second copy would put two xcb instances in one process.
 
 ### Consumer smoke test
 
