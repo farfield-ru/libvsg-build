@@ -108,8 +108,15 @@ Build-Component assimp @(
 # VulkanSceneGraph - shared (DLL). Windowing (native Win32) and the glslang
 # shader compiler are ON by default; both must survive into the artifact
 # (checked below).
+# VSG_SUPPORTS_ShaderOptimizer is pre-seeded OFF for the same reason the
+# vsgXchange options below are: upstream defaults it ON and then quietly keeps
+# it if find_package(SPIRV-Tools-opt) happens to succeed, so whatever is
+# installed on the build host decides what ends up in the artifact. It also
+# matches -DENABLE_OPT=OFF on glslang above and the vcpkg configuration this
+# build replaces, neither of which has the optimizer.
 Build-Component vsg @(
-    '-DBUILD_SHARED_LIBS=ON'
+    '-DBUILD_SHARED_LIBS=ON',
+    '-DVSG_SUPPORTS_ShaderOptimizer=OFF'
 )
 
 # VSG only *warns* and silently disables the shader compiler when glslang is
@@ -118,6 +125,22 @@ Build-Component vsg @(
 $VsgConfig = Join-Path $InstallDir 'lib/cmake/vsg/vsgConfig.cmake'
 if (-not (Select-String -Path $VsgConfig -Pattern 'find_package\(glslang' -Quiet)) {
     throw 'vsg was built WITHOUT the glslang shader compiler'
+}
+
+# The mirror of that check, for the optimizer. vsgConfig.cmake is generated as
+#   if (@VSG_SUPPORTS_ShaderOptimizer@)
+#       find_dependency(SPIRV-Tools-opt)
+# so a host-detected optimizer makes EVERY consumer need a SPIRV-Tools-opt
+# package this artifact does not ship, and find_package(vsg) fails outright.
+# Test the generated gate line itself rather than the whole file, so an
+# unrelated 'if (ON)' in a future VSG config template cannot mask this.
+$VsgConfigLines = Get-Content $VsgConfig
+for ($i = 1; $i -lt $VsgConfigLines.Count; $i++) {
+    if ($VsgConfigLines[$i] -match 'find_dependency\(SPIRV-Tools-opt\)' -and
+        $VsgConfigLines[$i - 1] -match 'if \(ON\)') {
+        throw ('vsg picked up SPIRV-Tools from the build host - vsgConfig.cmake ' +
+               'now requires a SPIRV-Tools-opt package this artifact does not ship')
+    }
 }
 
 # vsgXchange - shared (DLL). assimp is the only optional dependency enabled
@@ -151,6 +174,24 @@ Build-Component vsgimgui @(
     '-DBUILD_SHARED_LIBS=ON',
     '-DSHOW_DEMO_WINDOW=OFF'
 )
+
+# Consume the prefix the way a downstream project does - find_package,
+# compile, link, run - before packaging it. Building the libraries proves they
+# compile; only this proves the INSTALL is usable. CMAKE_PREFIX_PATH is the
+# install dir alone, so anything the artifact fails to provide surfaces here.
+# On Windows this is also the guard for the ImGui re-export: a vsgImGui DLL
+# that does not re-export the ImGui API fails to link main.cpp with LNK2019.
+$SmokeBuild = Join-Path $Work "build-smoke-$BuildType"
+if (Test-Path $SmokeBuild) { Remove-Item -Recurse -Force $SmokeBuild }
+cmake -S (Join-Path $Root 'scripts/smoke') -B $SmokeBuild -G Ninja `
+    "-DCMAKE_BUILD_TYPE=$BuildType" `
+    "-DCMAKE_PREFIX_PATH=$InstallDirCM"
+if ($LASTEXITCODE -ne 0) { throw 'smoke test failed to configure against the install prefix' }
+cmake --build $SmokeBuild
+if ($LASTEXITCODE -ne 0) { throw 'smoke test failed to build against the install prefix' }
+$env:PATH = (Join-Path $InstallDir 'bin') + [IO.Path]::PathSeparator + $env:PATH
+& (Join-Path $SmokeBuild 'vsg_smoke.exe')
+if ($LASTEXITCODE -ne 0) { throw 'smoke test binary failed to run' }
 
 $Archive = Join-Path $DistDir "vsg-$VsgTag-windows-x64-$BuildType.zip"
 Compress-Archive -Path (Join-Path $Work "install/vsg-$BuildType") -DestinationPath $Archive -Force
