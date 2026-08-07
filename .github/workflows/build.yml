@@ -11,7 +11,6 @@ env:
   VSGIMGUI_TAG: v0.7.0
   ASSIMP_TAG: v6.0.4
   GLSLANG_TAG: 16.3.0
-  VULKAN_SDK_VERSION: 1.4.341.1
 
 jobs:
   build:
@@ -52,61 +51,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-
-      - name: Install Vulkan SDK (Linux)
-        # Same action + commit pin as VulkanSceneGraph's own CI. Linux-only:
-        # the action's Windows path merely 7z-extracts the installer and the
-        # result has no Lib/vulkan-1.lib, so find_package(Vulkan) fails.
-        if: runner.os == 'Linux'
-        uses: humbletim/install-vulkan-sdk@e7d6e7b937bde4503c7ba5c9584c9dc68f44c4b8
-        with:
-          version: ${{ env.VULKAN_SDK_VERSION }}
-          cache: true
-
-      - name: Cache Vulkan SDK (Windows)
-        # The '-rt' key suffix busted the pre-RTBin cache when the runtime DLL
-        # started being cached alongside the SDK (see the install step below).
-        if: runner.os == 'Windows'
-        id: vulkan-cache
-        uses: actions/cache@v6
-        with:
-          path: C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}
-          key: vulkan-sdk-windows-${{ env.VULKAN_SDK_VERSION }}-rt
-
-      - name: Install Vulkan SDK (Windows)
-        # Official LunarG silent install (Qt IFW installer). The installer also
-        # puts the runtime loader (vulkan-1.dll) into System32, but System32 is
-        # not cacheable and every job runs on a fresh VM - so stash a copy
-        # inside the cached SDK tree (RTBin/ is our own dir; the SDK itself
-        # ships no vulkan-1.dll anywhere). The restore step below puts it back
-        # on cache-hit runs. Needed to RUN the consumer smoke test; the DLL
-        # stays outside the install prefix so it can never leak into the
-        # packaged artifact.
-        if: runner.os == 'Windows' && steps.vulkan-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $Installer = Join-Path $env:RUNNER_TEMP 'vulkan_sdk.exe'
-          curl.exe -sSL -o $Installer "https://sdk.lunarg.com/sdk/download/${{ env.VULKAN_SDK_VERSION }}/windows/vulkan_sdk.exe"
-          Start-Process -Wait $Installer -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install'
-          $RTBin = "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}\RTBin"
-          New-Item -ItemType Directory -Force $RTBin | Out-Null
-          Copy-Item 'C:\Windows\System32\vulkan-1.dll' $RTBin
-
-      - name: Restore Vulkan runtime DLL (Windows)
-        # Fresh VM + cache-hit means the installer above was skipped and no
-        # vulkan-1.dll exists anywhere on the machine; vsg.dll imports it, so
-        # the smoke test binary cannot even load without this.
-        if: runner.os == 'Windows' && steps.vulkan-cache.outputs.cache-hit == 'true'
-        shell: pwsh
-        run: |
-          Copy-Item "C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}\RTBin\vulkan-1.dll" 'C:\Windows\System32'
-
-      - name: Export VULKAN_SDK (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "VULKAN_SDK=C:\VulkanSDK\${{ env.VULKAN_SDK_VERSION }}" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
