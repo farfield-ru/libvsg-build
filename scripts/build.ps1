@@ -189,9 +189,13 @@ cmake -S (Join-Path $Root 'scripts/smoke') -B $SmokeBuild -G Ninja `
 if ($LASTEXITCODE -ne 0) { throw 'smoke test failed to configure against the install prefix' }
 cmake --build $SmokeBuild
 if ($LASTEXITCODE -ne 0) { throw 'smoke test failed to build against the install prefix' }
+# Running (unlike linking) also needs the Vulkan runtime loader vulkan-1.dll
+# resolvable - in CI the workflow restores it into System32 from the cached
+# SDK tree. A missing-DLL death is silent (exit 0xC0000135), hence the exit
+# code in the message.
 $env:PATH = (Join-Path $InstallDir 'bin') + [IO.Path]::PathSeparator + $env:PATH
 & (Join-Path $SmokeBuild 'vsg_smoke.exe')
-if ($LASTEXITCODE -ne 0) { throw 'smoke test binary failed to run' }
+if ($LASTEXITCODE -ne 0) { throw "smoke test binary failed to run (exit $LASTEXITCODE)" }
 
 $Archive = Join-Path $DistDir "vsg-$VsgTag-windows-x64-$BuildType.zip"
 Compress-Archive -Path (Join-Path $Work "install/vsg-$BuildType") -DestinationPath $Archive -Force

@@ -180,6 +180,10 @@ cmake -S "$ROOT/scripts/smoke" -B "$SMOKE_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
 cmake --build "$SMOKE_BUILD"
+# Running (unlike linking) also needs libvulkan.so.1 on the loader path. It is
+# NOT added here: GitHub's ubuntu images ship it, and locally it comes from
+# libvulkan-dev / an inherited LD_LIBRARY_PATH. If this fails to load, that is
+# the missing piece.
 LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}" "$SMOKE_BUILD/vsg_smoke"
 
 ARCHIVE="$DIST_DIR/vsg-$VSG_TAG-linux-x64-$BUILD_TYPE.tar.gz"
