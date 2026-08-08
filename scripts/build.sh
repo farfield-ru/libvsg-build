@@ -498,13 +498,24 @@ rm -rf "$SMOKE_BUILD"
 # crc32, deflate, gz*) issue #4 cites. shared.cpp exports exactly one symbol,
 # so "the dynamic export set is exactly that symbol" is both strictly stronger
 # and no more expensive. Linker-generated entries are filtered, not enumerated.
+#
+# STRONG symbols only (nm types T/D/B/R/i, not W/V/u). At -O0 the consumer's
+# OWN translation unit emits every used vsg/STL inline and template as an
+# out-of-line WEAK definition with default visibility - shared.cpp is
+# deliberately compiled like a naive consumer, and --exclude-libs governs
+# archives, not the consumer's objects - so the Debug smoke library
+# legitimately exports ~190 weak instantiations (ref_ptr ctors, std::forward)
+# that Release inlines away. Those are the consumer's own ODR-mergeable
+# duplicates, not absorbed-archive leaks; every leak this guard exists for
+# (aiGetMaterialColor, adler32, spv::*) arrives as a strong symbol from an
+# archive member. A single awk stage does both filters: no early-exit pipe
+# stage, and an empty result still reaches the comparison and its message.
 smoke_exports="$(nm -D --defined-only --format=posix "$SMOKE_BUILD/libvsg_smoke_shared.so" \
-                 | awk '{print $1}' \
-                 | grep -vE '^(_init|_fini|__bss_start|_edata|_end|__.*_impl)$' \
+                 | awk '$2 ~ /^[TDBRi]$/ && $1 !~ /^(_init|_fini|__bss_start|_edata|_end)$/ {print $1}' \
                  | sort)"
 if [ "$smoke_exports" != "vsg_smoke_shared_touch" ]; then
-  echo "ERROR: the smoke shared library's dynamic exports are not exactly its own" >&2
-  echo "       marker symbol - absorbed dependencies leaked, or the marker is gone." >&2
+  echo "ERROR: the smoke shared library's STRONG dynamic exports are not exactly its" >&2
+  echo "       own marker symbol - absorbed dependencies leaked, or the marker is gone." >&2
   echo "       Expected: vsg_smoke_shared_touch" >&2
   echo "       Got:" >&2
   printf '%s\n' "$smoke_exports" | sed 's/^/         /' >&2
