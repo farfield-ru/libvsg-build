@@ -356,8 +356,8 @@ if ($ConfigCode -match 'find_dependency|find_package|pkg_check_modules') {
     throw 'vsgallConfig.cmake grew a package lookup'
 }
 
-# And the artifact-wide version of the same promise: vsgallConfig.cmake is
-# the ONLY cmake file the prefix ships.
+# And the artifact-wide version of the same promise: the config and its
+# version file are the ONLY cmake files the prefix ships.
 $ShippedCMake = @(Get-ChildItem -Path $InstallDir -Recurse -Filter '*.cmake' |
                   Sort-Object Name)
 $ExpectedCMake = @('vsgallConfig.cmake', 'vsgallConfigVersion.cmake')
