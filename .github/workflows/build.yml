@@ -89,8 +89,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="vsg-${VSG_TAG}"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" \
-              --title "VulkanSceneGraph ${VSG_TAG} shared libraries" \
-              --notes "VulkanSceneGraph ${VSG_TAG}, vsgXchange ${VSGXCHANGE_TAG} and vsgImGui ${VSGIMGUI_TAG} built as shared libraries for Linux (x64) and Windows (x64, MSVC) in Release, Debug and RelWithDebInfo configurations. glslang ${GLSLANG_TAG} (VSG runtime shader compiler) and assimp ${ASSIMP_TAG} (vsgXchange model importers) are statically absorbed. vsgImGui compiles its pinned imgui/implot submodules in and re-exports the full ImGui/ImPlot API from the DLL."
+          TITLE="VulkanSceneGraph ${VSG_TAG} static libraries"
+          NOTES="VulkanSceneGraph ${VSG_TAG}, vsgXchange ${VSGXCHANGE_TAG} and vsgImGui ${VSGIMGUI_TAG} built as static (PIC) libraries for Linux (x64) and Windows (x64, MSVC, dynamic CRT) in Release, Debug and RelWithDebInfo configurations, consumed through a single dependency-free CMake config: find_package(vsgall) -> vsgall::vsgall. glslang ${GLSLANG_TAG} (VSG runtime shader compiler), assimp ${ASSIMP_TAG} (vsgXchange model importers) and vsgImGui's pinned imgui/implot submodules are part of the stated link line. The prefix carries the Vulkan headers and link artifact; the runtime Vulkan loader comes from the host system."
+          # Edit-if-exists so the notes always describe the CURRENT artifact
+          # shape - assets are re-uploaded on every main push, and notes that
+          # describe a previous shape would misdescribe the downloads.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" --title "$TITLE" --notes "$NOTES"
+          fi
           gh release upload "$TAG" dist/* --clobber
