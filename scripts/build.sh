@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Build VulkanSceneGraph + vsgXchange + vsgImGui as shared libraries on Linux.
+# Build VulkanSceneGraph + vsgXchange + vsgImGui as STATIC (PIC) libraries on
+# Linux, consumed through a single dependency-free CMake config:
 #
-# Usage: scripts/build.sh [Release|Debug|RelWithDebInfo]
+#   find_package(vsgall CONFIG REQUIRED)   ->   vsgall::vsgall
+#
+# Static + one hand-written config is the answer to issue #4: the shared-lib
+# artifact made every consumer stage libraries, manage rpaths and re-find
+# Vulkan/glslang/xcb at configure time - integration cost that scales with how
+# many places a dependency touches the consumer's build.
 #
 # No Vulkan SDK is required: the Vulkan headers and loader are built from
-# pinned Khronos tags and installed into the prefix, so the artifact satisfies
-# find_package(Vulkan) and carries its own libvulkan.so.1.
+# pinned Khronos tags. The prefix ships the headers and the LINK artifact
+# (libvulkan.so) only - the RUNTIME loader is a driver-integration component
+# owned by the host system, like libGL, and is deliberately not shipped.
 #
-# Helper dependencies (glslang for the VSG runtime shader compiler, assimp for
-# the vsgXchange model loaders) are built as static PIC libraries and absorbed
-# into the shared libraries. Everything installs into a single prefix per
-# build type: _work/install/vsg-<BuildType>/.
+# glslang (VSG runtime shader compiler) and assimp (vsgXchange model loaders)
+# are static PIC as before; now nothing absorbs them at build time - the
+# generated vsgallConfig.cmake states the whole static link line instead.
+# Everything installs into a single prefix per build type:
+# _work/install/vsg-<BuildType>/.
 #
 # Environment overrides:
 #   VSG_TAG        - vsg-dev/VulkanSceneGraph tag (default: v1.1.15)
@@ -33,10 +41,8 @@ VSGXCHANGE_TAG="${VSGXCHANGE_TAG:-v1.1.13}"
 VSGIMGUI_TAG="${VSGIMGUI_TAG:-v0.7.0}"
 ASSIMP_TAG="${ASSIMP_TAG:-v6.0.4}"
 GLSLANG_TAG="${GLSLANG_TAG:-16.3.0}"
-# Vulkan-Headers and Vulkan-Loader are built and INSTALLED INTO THE PREFIX so
-# the artifact satisfies find_package(Vulkan) by itself - vsgConfig.cmake
-# requires it, and so does every consumer. Both tags track the SDK version this
-# repo used to install on the runners.
+# Vulkan-Headers and Vulkan-Loader tags track the SDK version this repo used
+# to install on the runners before it started building Vulkan itself.
 VULKAN_TAG="${VULKAN_TAG:-vulkan-sdk-1.4.341.0}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,6 +61,17 @@ if [ "$BUILD_TYPE" = "Release" ]; then
   OPT_FLAGS="-march=x86-64-v2"
 fi
 
+# Every static archive is compiled with hidden symbol visibility: its objects
+# end up inside a consumer's SHARED object, and default visibility would turn
+# every absorbed vsg/glslang/assimp/zlib symbol into an export of that library
+# (modeuler-ng's libmodeuler_ng.so measurably exported 521 foreign symbols -
+# adler32, aiGetMaterialColor, ... - a live collision hazard for anything else
+# in the process). The smoke test below FAILS the build if these leak back in.
+# The Vulkan loader is exempt: it is a real shared library that manages its
+# own exports.
+VIS_C_FLAGS="-fvisibility=hidden"
+VIS_CXX_FLAGS="-fvisibility=hidden -fvisibility-inlines-hidden"
+
 clone() { # clone <dir-name> <url> <tag> [extra git-clone args...]
   local name="$1" url="$2" tag="$3"
   shift 3
@@ -70,6 +87,8 @@ clone() { # clone <dir-name> <url> <tag> [extra git-clone args...]
 }
 
 build() { # build <dir-name> [cmake args...]
+  # Call sites may append their own -DCMAKE_C_FLAGS/-DCMAKE_CXX_FLAGS; the
+  # later duplicate on a cmake command line wins over the defaults set here.
   local name="$1"
   shift
   local bdir="$WORK/build-$name-$BUILD_TYPE"
@@ -91,8 +110,7 @@ clone assimp   https://github.com/assimp/assimp.git             "$ASSIMP_TAG"
 clone vsg      https://github.com/vsg-dev/VulkanSceneGraph.git  "$VSG_TAG"
 clone vsgxchange https://github.com/vsg-dev/vsgXchange.git      "$VSGXCHANGE_TAG"
 # imgui + implot are git submodules compiled directly into the vsgImGui
-# library (that is what makes the shared Windows build export the full ImGui
-# API - see README).
+# library, so the archive carries the full ImGui/ImPlot object set.
 clone vsgimgui https://github.com/vsg-dev/vsgImGui.git          "$VSGIMGUI_TAG" \
   --recurse-submodules --shallow-submodules
 
@@ -100,24 +118,38 @@ clone vsgimgui https://github.com/vsg-dev/vsgImGui.git          "$VSGIMGUI_TAG" 
 # vsg, both of which find_package(Vulkan) against the prefix.
 build vulkan-headers
 
-# Vulkan-Loader - shared (libvulkan.so.1), installed into the prefix so the
-# artifact carries its own runtime loader. WSI: XCB only, which EXACTLY matches
-# the loader this build previously took from vcpkg/the SDK - verified by
-# comparing exported surface entry points (vkCreateXcbSurfaceKHR +
-# vkCreateDisplayPlaneSurfaceKHR, no Xlib, no Wayland). Leaving Xlib on would
-# also drag an xrandr dev package in for a surface type VSG never creates: it
-# takes an xcb_window_t.
+# Vulkan-Loader - built shared, but only its LINK artifact is kept below. WSI:
+# XCB only, which EXACTLY matches the loader this build previously took from
+# vcpkg/the SDK - verified by comparing exported surface entry points
+# (vkCreateXcbSurfaceKHR + vkCreateDisplayPlaneSurfaceKHR, no Xlib, no
+# Wayland). Leaving Xlib on would also drag an xrandr dev package in for a
+# surface type VSG never creates: it takes an xcb_window_t.
 build vulkan-loader \
   -DBUILD_TESTS=OFF \
   -DBUILD_WSI_XCB_SUPPORT=ON \
   -DBUILD_WSI_XLIB_SUPPORT=OFF \
   -DBUILD_WSI_WAYLAND_SUPPORT=OFF
 
+# Keep the LINK artifact only. Consumers link against the prefix's
+# libvulkan.so; at runtime the dynamic linker resolves its SONAME
+# (libvulkan.so.1) from the host - the runtime loader is the system's, exactly
+# as with the Vulkan SDK. Shipping a runtime loader (#3) solved a CI problem
+# in the artifact; the smoke test now takes its runtime loader from the
+# loader's build tree instead.
+real_loader="$(find "$INSTALL_DIR/lib" -maxdepth 1 -name 'libvulkan.so.*' -type f)"
+if [ "$(printf '%s\n' "$real_loader" | grep -c .)" -ne 1 ]; then
+  echo "ERROR: expected exactly one real libvulkan.so.<version>, found:" >&2
+  printf '%s\n' "$real_loader" >&2
+  exit 1
+fi
+rm -f "$INSTALL_DIR/lib/libvulkan.so" "$INSTALL_DIR/lib/libvulkan.so.1"
+mv "$real_loader" "$INSTALL_DIR/lib/libvulkan.so"
+
 # The loader is useless to VSG without the xcb surface entry point - a loader
 # built without it links fine and then fails at window creation.
-# NOT `nm ... | grep -q`: under `set -o pipefail` (line 18) grep -q exits on the
-# first match, nm dies of SIGPIPE with 141, and pipefail makes the whole
-# pipeline fail - so the guard fires on a PERFECTLY GOOD loader. Observed, not
+# NOT `nm ... | grep -q`: under `set -o pipefail` grep -q exits on the first
+# match, nm dies of SIGPIPE with 141, and pipefail makes the whole pipeline
+# fail - so the guard fires on a PERFECTLY GOOD loader. Observed, not
 # theoretical: that is exactly how this guard first behaved. Capture, then
 # match, so no pipe exists to break.
 vk_symbols="$(nm -D --defined-only "$INSTALL_DIR/lib/libvulkan.so")"
@@ -127,31 +159,35 @@ case "$vk_symbols" in
      exit 1 ;;
 esac
 
-# glslang - static, linked PRIVATE into libvsg.so (runtime GLSL->SPIR-V
-# compiler behind VSG_SUPPORTS_ShaderCompiler). Same configuration as the
-# vcpkg glslang port consumed by modeuler-ng: no spirv-opt (ENABLE_OPT=OFF),
-# no standalone tools, no tests.
+# glslang - static PIC, hidden visibility (consumers link it into shared
+# objects). Same configuration as the vcpkg glslang port modeuler-ng used to
+# consume: no spirv-opt (ENABLE_OPT=OFF), no standalone tools, no tests.
 build glslang \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_C_FLAGS="$OPT_FLAGS $VIS_C_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$OPT_FLAGS $VIS_CXX_FLAGS" \
   -DBUILD_EXTERNAL=OFF \
   -DGLSLANG_TESTS=OFF \
   -DENABLE_OPT=OFF \
   -DENABLE_GLSLANG_BINARIES=OFF
 
-# assimp - static, linked PRIVATE into libvsgXchange.so (model importers).
-# Vendored zlib keeps the build hermetic on both platforms.
+# assimp - static PIC, hidden visibility (model importers). Vendored zlib
+# keeps the build hermetic on both platforms.
 build assimp \
   -DBUILD_SHARED_LIBS=OFF \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_C_FLAGS="$OPT_FLAGS $VIS_C_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$OPT_FLAGS $VIS_CXX_FLAGS" \
   -DASSIMP_BUILD_ZLIB=ON \
   -DASSIMP_BUILD_TESTS=OFF \
   -DASSIMP_BUILD_ASSIMP_TOOLS=OFF \
   -DASSIMP_INSTALL_PDB=OFF \
   -DASSIMP_WARNINGS_AS_ERRORS=OFF
 
-# VulkanSceneGraph - shared. Windowing (xcb) and the glslang shader compiler
-# are ON by default; both must survive into the artifact (checked below).
+# VulkanSceneGraph - STATIC PIC. Windowing (xcb) and the glslang shader
+# compiler are ON by default; both must survive into the artifact (checked
+# below).
 #
 # VSG_SUPPORTS_ShaderOptimizer is pre-seeded OFF for the same reason the
 # vsgXchange options below are: upstream defaults it ON and then quietly keeps
@@ -160,12 +196,17 @@ build assimp \
 # matches -DENABLE_OPT=OFF on glslang above and the vcpkg configuration this
 # build replaces, neither of which has the optimizer.
 build vsg \
-  -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_C_FLAGS="$OPT_FLAGS $VIS_C_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$OPT_FLAGS $VIS_CXX_FLAGS" \
   -DVSG_SUPPORTS_ShaderOptimizer=OFF
 
 # VSG only *warns* and silently disables the shader compiler when glslang is
 # not found - guard against shipping a degraded build. The installed
 # vsgConfig.cmake contains find_package(glslang) iff the compiler is in.
+# (The upstream configs are removed from the artifact further down; at this
+# point in the build they are still the most direct record of what vsg did.)
 if ! grep -q "find_package(glslang" "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake"; then
   echo "ERROR: vsg was built WITHOUT the glslang shader compiler" >&2
   exit 1
@@ -174,30 +215,32 @@ fi
 # The mirror of that check, for the optimizer. vsgConfig.cmake is generated as
 #   if (@VSG_SUPPORTS_ShaderOptimizer@)
 #       find_dependency(SPIRV-Tools-opt)
-# so a host-detected optimizer makes EVERY consumer need a SPIRV-Tools-opt
-# package this artifact does not ship, and find_package(vsg) fails outright.
-# Test the generated gate line itself rather than the whole file, so an
-# unrelated `if (ON)` in a future VSG config template cannot mask this.
-# Also pipe-free, and here the pipe was the DANGEROUS direction: `grep ... |
-# grep -q` returning 141 on SIGPIPE would have made this `if` false and the
-# guard silently skip on exactly the broken artifact it exists to reject.
-# `|| true` because grep exits 1 when the file has no such line at all, which
-# is the healthy case and must not trip `set -e`.
+# so a host-detected optimizer means vsg was built against SPIRV-Tools this
+# artifact does not ship. Test the generated gate line itself rather than the
+# whole file, so an unrelated `if (ON)` in a future VSG config template cannot
+# mask this. Also pipe-free, and here the pipe was the DANGEROUS direction:
+# `grep ... | grep -q` returning 141 on SIGPIPE would have made this `if`
+# false and the guard silently skip on exactly the broken artifact it exists
+# to reject. `|| true` because grep exits 1 when the file has no such line at
+# all, which is the healthy case and must not trip `set -e`.
 spirv_gate="$(grep -B1 "find_dependency(SPIRV-Tools-opt)" \
                 "$INSTALL_DIR/lib/cmake/vsg/vsgConfig.cmake" || true)"
 case "$spirv_gate" in
   *"if (ON)"*)
-     echo "ERROR: vsg picked up SPIRV-Tools from the build host - vsgConfig.cmake" >&2
-     echo "       now requires a SPIRV-Tools-opt package this artifact does not ship" >&2
+     echo "ERROR: vsg picked up SPIRV-Tools from the build host - the artifact" >&2
+     echo "       would depend on a SPIRV-Tools-opt package it does not ship" >&2
      exit 1 ;;
 esac
 
-# vsgXchange - shared. assimp is the only optional dependency enabled
+# vsgXchange - static PIC. assimp is the only optional dependency enabled
 # (matches modeuler-ng's vcpkg feature set: vsgxchange[assimp]). The other
 # optional deps are pre-seeded OFF so libraries present on the build host can
 # never sneak in. stbi/dds/ktx-read/gltf/3DTiles readers are built-in.
 build vsgxchange \
-  -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_C_FLAGS="$OPT_FLAGS $VIS_C_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$OPT_FLAGS $VIS_CXX_FLAGS" \
   -DvsgXchange_freetype=OFF \
   -DvsgXchange_curl=OFF \
   -DvsgXchange_GDAL=OFF \
@@ -213,28 +256,207 @@ if ! grep -q "^vsgXchange_assimp:BOOL=ON" "$WORK/build-vsgxchange-$BUILD_TYPE/CM
   exit 1
 fi
 
-# vsgImGui - shared, imgui + implot compiled in and re-exported.
+# vsgImGui - static PIC, imgui + implot compiled in from its pinned
+# submodules, so the archive carries the complete ImGui/ImPlot object set.
 # SHOW_DEMO_WINDOW=OFF matches the vcpkg port (ImGui::ShowDemoWindow becomes
 # a no-op stub).
 build vsgimgui \
-  -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DCMAKE_C_FLAGS="$OPT_FLAGS $VIS_C_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$OPT_FLAGS $VIS_CXX_FLAGS" \
   -DSHOW_DEMO_WINDOW=OFF
 
-# Consume the prefix the way a downstream project does - find_package,
+# ---------------------------------------------------------------------------
+# Package config: one hand-written vsgallConfig.cmake, ZERO package lookups.
+#
+# Upstream's per-package configs re-find Vulkan, glslang and xcb because
+# upstream links them dynamically; with everything absorbed into static
+# archives those lookups are pure integration cost for consumers (issue #4:
+# Vulkan_ROOT/glslang_DIR plumbing, a vcpkg vulkan port, pkg-config required
+# at configure time). The prefix ships exactly ONE cmake file, stating the
+# link line by path, and the upstream configs are removed so nothing can
+# quietly depend on them.
+
+pick_lib() { # pick_lib <label> <candidate-file-name...> -> the one that exists
+  # Candidates cover the per-config name postfixes of every upstream project
+  # ("d"/"rd" from vsgMacros, "d" from assimp) so this script does not encode
+  # which project applies which postfix on which platform - but a candidate
+  # set matching zero or several files fails the build.
+  local label="$1"; shift
+  local found="" f
+  for f in "$@"; do
+    [ -e "$INSTALL_DIR/lib/$f" ] || continue
+    if [ -n "$found" ]; then
+      echo "ERROR: several archives match $label in $INSTALL_DIR/lib: $found, $f" >&2
+      exit 1
+    fi
+    found="$f"
+  done
+  if [ -z "$found" ]; then
+    echo "ERROR: no archive found for $label in $INSTALL_DIR/lib (tried: $*)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$found"
+}
+
+LIB_VSGXCHANGE="$(pick_lib vsgXchange libvsgXchange.a libvsgXchanged.a libvsgXchangerd.a)"
+LIB_VSGIMGUI="$(pick_lib vsgImGui libvsgImGui.a libvsgImGuid.a libvsgImGuird.a)"
+LIB_VSG="$(pick_lib vsg libvsg.a libvsgd.a libvsgrd.a)"
+LIB_GLSLANG_LIMITS="$(pick_lib glslang-default-resource-limits \
+  libglslang-default-resource-limits.a libglslang-default-resource-limitsd.a)"
+LIB_GLSLANG="$(pick_lib glslang libglslang.a libglslangd.a)"
+LIB_SPIRV="$(pick_lib SPIRV libSPIRV.a libSPIRVd.a)"
+LIB_MACHIND="$(pick_lib MachineIndependent libMachineIndependent.a libMachineIndependentd.a)"
+LIB_GENCODE="$(pick_lib GenericCodeGen libGenericCodeGen.a libGenericCodeGend.a)"
+LIB_OSDEP="$(pick_lib OSDependent libOSDependent.a libOSDependentd.a)"
+LIB_ASSIMP="$(pick_lib assimp libassimp.a libassimpd.a)"
+LIB_ZLIB="$(pick_lib zlib libzlibstatic.a libzlibstaticd.a)"
+
+# Drop everything package-shaped the upstream installs left behind: cmake
+# package dirs (vsg, vsgXchange, vsgImGui, glslang, assimp, VulkanHeaders,
+# VulkanLoader), pkg-config files, and the Vulkan XML registry (consumers
+# compile against include/vulkan; nothing reads the registry).
+rm -rf "$INSTALL_DIR/lib/cmake" "$INSTALL_DIR/lib/pkgconfig" \
+       "$INSTALL_DIR/share/vulkan" "$INSTALL_DIR/share/cmake"
+rmdir "$INSTALL_DIR/share" 2>/dev/null || true
+
+VSGALL_CMAKE_DIR="$INSTALL_DIR/lib/cmake/vsgall"
+mkdir -p "$VSGALL_CMAKE_DIR"
+{
+  cat <<EOF
+# vsgallConfig.cmake - generated by farfield-ru/libvsg-build for
+# VulkanSceneGraph $VSG_TAG ($BUILD_TYPE, Linux x64). The single supported
+# entry point of this prefix:
+#
+#   find_package(vsgall CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE vsgall::vsgall)
+#
+# Deliberately contains NO find_dependency/find_package/pkg_check_modules.
+# Every dependency is either a static archive inside this prefix, stated
+# below by path, or a plain system library name (xcb, pthread, dl) the linker
+# resolves itself. The Vulkan entry is the LINK artifact (libvulkan.so); the
+# runtime loader (libvulkan.so.1) comes from the host system at run time.
+EOF
+  cat <<'EOF'
+
+if(TARGET vsgall::vsgall)
+  return()
+endif()
+
+get_filename_component(_vsgall_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+add_library(vsgall::vsgall INTERFACE IMPORTED)
+set_target_properties(vsgall::vsgall PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${_vsgall_prefix}/include"
+  INTERFACE_COMPILE_FEATURES "cxx_std_17")
+
+# Static link order: each archive precedes the archives it pulls symbols from.
+set_property(TARGET vsgall::vsgall PROPERTY INTERFACE_LINK_LIBRARIES
+EOF
+  for lib in "$LIB_VSGXCHANGE" "$LIB_VSGIMGUI" "$LIB_VSG" \
+             "$LIB_GLSLANG_LIMITS" "$LIB_GLSLANG" "$LIB_SPIRV" \
+             "$LIB_MACHIND" "$LIB_GENCODE" "$LIB_OSDEP" \
+             "$LIB_ASSIMP" "$LIB_ZLIB" libvulkan.so; do
+    printf '  "${_vsgall_prefix}/lib/%s"\n' "$lib"
+  done
+  cat <<'EOF'
+  xcb
+  pthread
+  dl)
+
+# The linker-level half of symbol hiding. The archives are compiled with
+# -fvisibility=hidden, but assimp marks its public API with an explicit
+# visibility attribute that OVERRIDES the compile flag, so a consumer's
+# shared object would re-export aiGetMaterial* and friends. --exclude-libs
+# localizes every symbol drawn from these archives when a consumer links a
+# shared object, whatever the objects' own visibility says. Scoped to these
+# archives by name - a consumer's other static libraries are not affected.
+set_property(TARGET vsgall::vsgall PROPERTY INTERFACE_LINK_OPTIONS
+EOF
+  for lib in "$LIB_VSGXCHANGE" "$LIB_VSGIMGUI" "$LIB_VSG" \
+             "$LIB_GLSLANG_LIMITS" "$LIB_GLSLANG" "$LIB_SPIRV" \
+             "$LIB_MACHIND" "$LIB_GENCODE" "$LIB_OSDEP" \
+             "$LIB_ASSIMP" "$LIB_ZLIB"; do
+    printf '  "LINKER:--exclude-libs,%s"\n' "$lib"
+  done
+  cat <<'EOF'
+)
+
+unset(_vsgall_prefix)
+EOF
+  printf '\nset(vsgall_VERSION "%s")\n' "${VSG_TAG#v}"
+} > "$VSGALL_CMAKE_DIR/vsgallConfig.cmake"
+
+# Lock the config's defining property in: no package lookups, ever. Comments
+# are stripped first - the config's own header legitimately NAMES the banned
+# commands while promising their absence.
+config_code="$(sed 's/#.*//' "$VSGALL_CMAKE_DIR/vsgallConfig.cmake")"
+case "$config_code" in
+  *find_dependency*|*find_package*|*pkg_check_modules*)
+    echo "ERROR: vsgallConfig.cmake grew a package lookup" >&2
+    exit 1 ;;
+esac
+
+# And the artifact-wide version of the same promise: vsgallConfig.cmake is
+# the ONLY cmake file the prefix ships.
+shipped_cmake="$(find "$INSTALL_DIR" -name '*.cmake')"
+if [ "$shipped_cmake" != "$VSGALL_CMAKE_DIR/vsgallConfig.cmake" ]; then
+  echo "ERROR: unexpected cmake files in the prefix:" >&2
+  printf '%s\n' "$shipped_cmake" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Consume the prefix the way a downstream project does - find_package(vsgall),
 # compile, link, run - before packaging it. Building the libraries proves they
-# compile; only this proves the INSTALL is usable. CMAKE_PREFIX_PATH is the
-# install dir alone, so anything the artifact fails to provide surfaces here.
+# compile; only this proves the INSTALL is usable.
+#
+# SCRUBBED environment: env -i means no VULKAN_SDK, no vcpkg variables, no
+# CMAKE_PREFIX_PATH, no inherited LD_LIBRARY_PATH - so anything the prefix
+# fails to provide surfaces HERE instead of in a consumer. (Issue #4: round 1
+# of the consumer integration found three defects of exactly the class "the
+# prefix needs something the producer never checked for".)
 SMOKE_BUILD="$WORK/build-smoke-$BUILD_TYPE"
+SCRUB=(env -i PATH=/usr/local/bin:/usr/bin:/bin)
 rm -rf "$SMOKE_BUILD"
-cmake -S "$ROOT/scripts/smoke" -B "$SMOKE_BUILD" -G Ninja \
+"${SCRUB[@]}" cmake -S "$ROOT/scripts/smoke" -B "$SMOKE_BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
-cmake --build "$SMOKE_BUILD"
-# Running (unlike linking) also needs libvulkan.so.1 on the loader path. It is
-# NOT added here: GitHub's ubuntu images ship it, and locally it comes from
-# libvulkan-dev / an inherited LD_LIBRARY_PATH. If this fails to load, that is
-# the missing piece.
-LD_LIBRARY_PATH="$INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}" "$SMOKE_BUILD/vsg_smoke"
+"${SCRUB[@]}" cmake --build "$SMOKE_BUILD"
+
+# The smoke SHARED library proves two properties of the archives that the
+# executable cannot: they are PIC (this link fails otherwise), and they are
+# visibility-hidden - absorbed vsg/glslang/assimp/zlib symbols must NOT
+# resurface as dynamic exports of a consumer's shared object.
+smoke_exports="$(nm -D --defined-only "$SMOKE_BUILD/libvsg_smoke_shared.so")"
+case "$smoke_exports" in
+  *vsg_smoke_shared_touch*) ;;
+  *) echo "ERROR: smoke shared library does not export its own marker symbol -" >&2
+     echo "       nm inspected the wrong file?" >&2
+     exit 1 ;;
+esac
+for leaked in aiGetMaterial inflate glslang; do
+  case "$smoke_exports" in
+    *"$leaked"*)
+      echo "ERROR: absorbed-dependency symbol '$leaked' is a dynamic export of the" >&2
+      echo "       smoke shared library - hidden visibility got lost (issue #4)" >&2
+      exit 1 ;;
+  esac
+done
+
+# Running also needs a RUNTIME Vulkan loader, which the prefix deliberately
+# does not ship. Take the one just built: pointing LD_LIBRARY_PATH at the
+# loader's BUILD tree (not at the prefix) keeps "the artifact needs only
+# system libraries at run time" honest, without requiring libvulkan1 on the
+# build host. Runtime-loader provisioning belongs to the build environment,
+# not to the artifact.
+LOADER_RUNTIME_DIR="$WORK/build-vulkan-loader-$BUILD_TYPE/loader"
+if [ ! -e "$LOADER_RUNTIME_DIR/libvulkan.so.1" ]; then
+  echo "ERROR: no runtime loader at $LOADER_RUNTIME_DIR to run the smoke test with" >&2
+  exit 1
+fi
+"${SCRUB[@]}" LD_LIBRARY_PATH="$LOADER_RUNTIME_DIR" "$SMOKE_BUILD/vsg_smoke"
 
 ARCHIVE="$DIST_DIR/vsg-$VSG_TAG-linux-x64-$BUILD_TYPE.tar.gz"
 tar -czf "$ARCHIVE" -C "$WORK/install" "vsg-$BUILD_TYPE"
