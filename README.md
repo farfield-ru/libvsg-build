@@ -217,6 +217,15 @@ Change the tags in `.github/workflows/build.yml` (and the defaults in
 `vsg-<tag>` is produced. Mind upstream's cross-version constraints:
 vsgXchange `v1.1.13` requires vsg ≥ 1.1.14, vsgImGui `v0.7.0` requires
 vsg ≥ 1.1.10, vsgXchange requires assimp ≥ 5.1. The glslang archive list in
-the generated config is discovered, not hardcoded, but a glslang upgrade that
-merges or renames its component libraries will trip the `pick_lib` guard —
-update the candidate lists in both scripts alongside.
+the generated config is discovered, not hardcoded, but `pick_lib` only checks
+that a **file exists**, not that it contains anything. glslang 16.3.0 has
+already consolidated its code into `libglslang.a`, and `libSPIRV.a`,
+`libMachineIndependent.a`, `libGenericCodeGen.a` and `libOSDependent.a` ship as
+~1.4 KB archives holding a single stub object — so a *rename* trips `pick_lib`,
+but a further *merge* would not: the stubs would still be found and the link
+line would still be generated.
+
+What actually catches a broken glslang set is the smoke test, which compiles a
+trivial shader through `vsg::ShaderCompiler` and therefore pulls those archives
+and exercises their order in the generated link line. Keep the candidate lists
+in both scripts up to date on a rename; rely on the smoke test for the rest.
