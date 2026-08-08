@@ -33,11 +33,14 @@ jobs:
 
       - name: Install build dependencies (Linux)
         # libxcb1-dev + pkg-config: needed to BUILD vsg's xcb windowing
-        # support here. Consumers no longer need either — the prefix ships no
-        # vsgConfig.cmake and its own config performs no pkg-config lookup, so
-        # the only requirement it places on a consumer's machine is a libxcb
-        # the linker can find by name. Do not delete this step on the strength
-        # of that: vsg itself still needs the headers at build time.
+        # support here.
+        #
+        # Of the two, consumers are freed from pkg-config only: the prefix
+        # ships no vsgConfig.cmake and its own config performs no pkg-config
+        # lookup. They still need libxcb1-dev. The generated config names
+        # `xcb` on the link line, and -lxcb resolves through libxcb.so, which
+        # on Debian/Ubuntu is in libxcb1-dev - the runtime libxcb1 package
+        # ships only libxcb.so.1 and does not satisfy the linker.
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config libxcb1-dev
 
