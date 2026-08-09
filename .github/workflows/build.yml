@@ -3,6 +3,9 @@ name: Build VSG
 on:
   push:
     branches: [main]
+    # Doc-only commits cannot change an archive; six lanes is too much to spend
+    # proving that.
+    paths-ignore: ['**.md']
   # PRs are gated. Without this the repo had NO automatic validation at all:
   # every check on #1-#5 came from a manual `gh workflow run`, so whether a PR
   # had been built at all depended on someone remembering. #5 in particular was
@@ -10,17 +13,22 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Upload the built archives to the release (CLOBBERS the existing assets)'
+        type: boolean
+        default: false
 
 # One in-flight run per ref. Six lanes at up to 120 minutes each is the most
 # expensive thing this repo does, and a PR pushed three times would otherwise
 # stack 18 of them.
 #
-# cancel-in-progress is deliberately PR-ONLY. A push to main does not just
-# build: its `release` job re-uploads all six assets with --clobber, and
-# cancelling that midway leaves the release holding a MIX of old and new
-# archives — with the tag unchanged, so consumers pinning by SHA256 see an
-# unexplained hash mismatch on some platforms and not others. PR runs are
-# disposable; publishing runs must finish.
+# cancel-in-progress is deliberately PR-ONLY. A publishing run (a dispatch
+# with publish=true) re-uploads all six assets with --clobber, and cancelling
+# that midway leaves the release holding a MIX of old and new archives — with
+# the tag unchanged, so consumers pinning by SHA256 see an unexplained hash
+# mismatch on some platforms and not others. PR runs are disposable;
+# publishing runs must finish.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -97,7 +105,21 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # Publishing is now EXPLICIT: dispatch the workflow with publish=true.
+    #
+    # It used to happen on every push to main, which made merging ANY commit —
+    # a README fix, a CI tweak — silently re-upload all six assets with
+    # --clobber. The archives are not reproducible (`tar -czf` records mtimes,
+    # gzip stamps a timestamp), so an identical rebuild still changes every
+    # SHA256: rebuilding this repo's own sources unchanged produced
+    # 5004db60... against the published c793bee3... So a cosmetic merge here
+    # broke every consumer pinning by hash, with the tag unchanged to explain
+    # it. That is exactly what took modeuler-ng's development branch down and
+    # forced its PR #129.
+    #
+    # Now a merge builds and proves the change; shipping it is a separate,
+    # deliberate act — after which consumers re-pin once, on purpose.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,8 +140,8 @@ jobs:
           TITLE="VulkanSceneGraph ${VSG_TAG} static libraries"
           NOTES="VulkanSceneGraph ${VSG_TAG}, vsgXchange ${VSGXCHANGE_TAG} and vsgImGui ${VSGIMGUI_TAG} built as static (PIC) libraries for Linux (x64) and Windows (x64, MSVC, dynamic CRT) in Release, Debug and RelWithDebInfo configurations, consumed through a single dependency-free CMake config: find_package(vsgall) -> vsgall::vsgall. glslang ${GLSLANG_TAG} (VSG runtime shader compiler), assimp ${ASSIMP_TAG} (vsgXchange model importers) and vsgImGui's pinned imgui/implot submodules are part of the stated link line. The prefix carries the Vulkan headers and link artifact; the runtime Vulkan loader comes from the host system."
           # Edit-if-exists so the notes always describe the CURRENT artifact
-          # shape - assets are re-uploaded on every main push, and notes that
-          # describe a previous shape would misdescribe the downloads.
+          # shape - a publish re-uploads every asset, and notes describing a
+          # previous shape would misdescribe the downloads.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "$TITLE" --notes "$NOTES"
           else

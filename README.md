@@ -201,9 +201,23 @@ left behind, runs the smoke test and packages an archive into `_work/dist/`.
 ## CI
 
 `.github/workflows/build.yml` runs a 2 (OS) × 3 (build type) matrix on every
-push to `main` (and on manual dispatch), uploads each build as a workflow
-artifact, and then creates/updates the `vsg-<VSG_TAG>` GitHub Release with all
-six archives.
+pull request to `main`, on every push to `main` (doc-only commits excepted),
+and on manual dispatch, uploading each build as a workflow artifact.
+
+**Publishing is separate and explicit.** The release job runs only for a
+manual dispatch with **`publish: true`**, and then creates/updates the
+`vsg-<VSG_TAG>` release with all six archives.
+
+That split exists because the archives are **not reproducible** — `tar -czf`
+records mtimes and gzip stamps a timestamp, so rebuilding identical sources
+still changes every SHA256. While publishing happened on every push to `main`,
+merging any commit at all — a README fix, a CI tweak — silently re-uploaded all
+six assets with `--clobber` and broke every consumer pinning by hash, with the
+tag unchanged to explain it. Consumers do pin by hash: modeuler-ng's
+`cmake/FetchVSG.cmake` carries a per-asset SHA256, and this is what took its
+`development` branch down once already.
+
+So: merge freely, and ship deliberately.
 
 Windows builds are pinned to `windows-2022` (VS 2022, MSVC 14.4x): the
 VS 2026 toolset currently on `windows-latest` (MSVC 14.51) has a documented
@@ -215,8 +229,10 @@ back to `windows-latest` once the MSVC fix ships.
 ## Upgrading
 
 Change the tags in `.github/workflows/build.yml` (and the defaults in
-`scripts/build.sh` / `scripts/build.ps1`), push to `main`, and a new release
-`vsg-<tag>` is produced. Mind upstream's cross-version constraints:
+`scripts/build.sh` / `scripts/build.ps1`) and merge to `main`; then dispatch
+the workflow with **`publish: true`** to produce the `vsg-<tag>` release.
+Tell consumers to re-pin afterwards — every asset's SHA256 changes on a
+publish, whether or not its contents did. Mind upstream's cross-version constraints:
 vsgXchange `v1.1.13` requires vsg ≥ 1.1.14, vsgImGui `v0.7.0` requires
 vsg ≥ 1.1.10, vsgXchange requires assimp ≥ 5.1. The glslang archive list in
 the generated config is discovered, not hardcoded, but `pick_lib` only checks
