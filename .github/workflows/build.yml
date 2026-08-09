@@ -3,7 +3,27 @@ name: Build VSG
 on:
   push:
     branches: [main]
+  # PRs are gated. Without this the repo had NO automatic validation at all:
+  # every check on #1-#5 came from a manual `gh workflow run`, so whether a PR
+  # had been built at all depended on someone remembering. #5 in particular was
+  # reviewed twice, and green, before anyone ran the matrix against it.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
+# One in-flight run per ref. Six lanes at up to 120 minutes each is the most
+# expensive thing this repo does, and a PR pushed three times would otherwise
+# stack 18 of them.
+#
+# cancel-in-progress is deliberately PR-ONLY. A push to main does not just
+# build: its `release` job re-uploads all six assets with --clobber, and
+# cancelling that midway leaves the release holding a MIX of old and new
+# archives — with the tag unchanged, so consumers pinning by SHA256 see an
+# unexplained hash mismatch on some platforms and not others. PR runs are
+# disposable; publishing runs must finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   VSG_TAG: v1.1.15
